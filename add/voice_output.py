@@ -22,6 +22,8 @@ WELCOME_SEQUENCE = ("01_greeting", "02_1_first_gift_question")
 REPEAT_QUESTION_SEQUENCE = ("02_2_repeat_question",)
 TASK_FAILED_SEQUENCE = ("03_1_task_failed",)
 TASK_ACCEPTED_SEQUENCE = ("03_2_task_accepted",)
+GRASP_FAILED_SEQUENCE = ("04_1_grasp_failed",)
+REGRASP_OOPSY_SEQUENCE = ("06_3_oopsy",)
 RECOMMENDED_GIFT_FILE = Path(
     "03_2_task_accepted/04_let_me_pick_a_gift_for_you.mp3"
 )
@@ -130,6 +132,14 @@ class VoiceOutput:
     def play_task_failed(self) -> str:
         """Tell the user that speech or the requested gift was not found."""
         return self.play_sequence(TASK_FAILED_SEQUENCE)
+
+    def play_grasp_failed(self) -> str:
+        """Tell the user that grasp retries have been exhausted."""
+        return self.play_sequence(GRASP_FAILED_SEQUENCE)
+
+    def play_regrasp_oopsy(self) -> str:
+        """Acknowledge a failed grasp before starting another attempt."""
+        return self.play_sequence(REGRASP_OOPSY_SEQUENCE)
 
     def play_reply_thanks(self) -> str:
         """Reply to the recipient while the confirmed handover completes."""

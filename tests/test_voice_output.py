@@ -5,8 +5,10 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from add.voice_output import (
+    GRASP_FAILED_SEQUENCE,
     PROMPT_ONLY,
     RECOMMENDED_GIFT_FILE,
+    REGRASP_OOPSY_SEQUENCE,
     START_RECOGNITION,
     START_RECOMMENDED_GIFT,
     START_RETRY_RECOGNITION,
@@ -62,6 +64,37 @@ def test_repeat_question_requests_retry_recognition(tmp_path: Path) -> None:
     assert result is not None
     assert result.files == (prompt,)
     assert result.purpose == START_RETRY_RECOGNITION
+
+
+def test_regrasp_prompts_use_the_expected_directories(tmp_path: Path) -> None:
+    grasp_failed_dir = tmp_path / GRASP_FAILED_SEQUENCE[0]
+    oopsy_dir = tmp_path / REGRASP_OOPSY_SEQUENCE[0]
+    grasp_failed_dir.mkdir()
+    oopsy_dir.mkdir()
+    grasp_failed_prompt = grasp_failed_dir / "01_failed.mp3"
+    oopsy_prompt = oopsy_dir / "01_oopsy.mp3"
+    grasp_failed_prompt.touch()
+    oopsy_prompt.touch()
+    output = VoiceOutput(tmp_path, player="/bin/true", rng=_FirstChoice())
+    try:
+        assert "06_3_oopsy" in output.play_regrasp_oopsy()
+        assert "04_1_grasp_failed" in output.play_grasp_failed()
+        results = []
+        deadline = time.monotonic() + 1.0
+        while len(results) < 2 and time.monotonic() < deadline:
+            result = output.poll()
+            if result is None:
+                time.sleep(0.01)
+            else:
+                results.append(result)
+    finally:
+        output.close()
+
+    assert [result.files for result in results] == [
+        (oopsy_prompt,),
+        (grasp_failed_prompt,),
+    ]
+    assert all(result.purpose == PROMPT_ONLY for result in results)
 
 
 def test_recommended_gift_plays_the_exact_configured_file(tmp_path: Path) -> None:

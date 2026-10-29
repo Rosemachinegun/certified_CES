@@ -818,8 +818,8 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=GRIP_SIGNAL_DEFAULTS.retry_max_attempts,
         help=(
-            "Deprecated compatibility option; failed-grasp retries are now "
-            "unlimited. Use --no-grip-retry-loop to stop automatic retries."
+            "Maximum automatic re-grasp attempts after the initial grasp; "
+            "values <= 0 allow unlimited retries."
         ),
     )
     parser.add_argument(

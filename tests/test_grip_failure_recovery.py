@@ -65,6 +65,20 @@ class FakeIkPublisher:
         return self.generation
 
 
+class FakeVoiceOutput:
+    def __init__(self) -> None:
+        self.regrasp_oopsy_calls = 0
+        self.grasp_failed_calls = 0
+
+    def play_regrasp_oopsy(self) -> str:
+        self.regrasp_oopsy_calls += 1
+        return "oopsy prompt playing"
+
+    def play_grasp_failed(self) -> str:
+        self.grasp_failed_calls += 1
+        return "grasp failed prompt playing"
+
+
 def test_left_grip_failure_returns_home_even_when_retry_loop_disabled() -> None:
     app = GraspDemoApp.__new__(GraspDemoApp)
     app.args = Namespace(
@@ -144,6 +158,7 @@ def test_failure_recovery_continues_with_fresh_grasp_pipeline() -> None:
     app.robot_actions = FakeRobotActions()
     app.ik_publisher = FakeIkPublisher()
     app.action_executor = ImmediateExecutor()
+    app.voice_output = FakeVoiceOutput()
     submitted = []
     app.submit_sam3 = lambda bundle, retry=False: submitted.append((bundle, retry))
 
@@ -157,9 +172,12 @@ def test_failure_recovery_continues_with_fresh_grasp_pipeline() -> None:
 
     assert app.state.retry_stage is RetryStage.SAM3
     assert submitted == [(frame, True)]
+    assert app.state.retry_attempts == 1
+    assert app.voice_output.regrasp_oopsy_calls == 1
+    assert app.voice_output.grasp_failed_calls == 0
 
 
-def test_continuous_place_switch_does_not_limit_failure_regrasp() -> None:
+def test_retry_limit_stops_regrasp_and_plays_final_failure_prompt() -> None:
     app = GraspDemoApp.__new__(GraspDemoApp)
     app.args = Namespace(
         ik_hand="auto",
@@ -171,15 +189,49 @@ def test_continuous_place_switch_does_not_limit_failure_regrasp() -> None:
     app.robot_actions = FakeRobotActions()
     app.ik_publisher = FakeIkPublisher()
     app.action_executor = ImmediateExecutor()
+    app.voice_output = FakeVoiceOutput()
+    app.state.retry_attempts = 3
 
     app.start_grip_failure_recovery(
         "GRIP_FAILED_MIN_LIMIT hand=left: reached min",
         failed_hand="left",
     )
 
-    # Failed grasps retry indefinitely; only the explicit retry-loop switch
-    # disables the recovery loop.
+    assert app.state.retry_will_regrasp is False
+    assert app.state.retry_attempts == 3
+    assert app.voice_output.regrasp_oopsy_calls == 0
+    assert app.voice_output.grasp_failed_calls == 1
+    assert "retry limit reached (3)" in app.state.status
+
+    app.update_recovery()
+
+    assert app.state.retry_stage is RetryStage.IDLE
+    assert "grip retry limit reached (3)" in app.state.status
+
+
+def test_nonpositive_retry_limit_remains_unlimited() -> None:
+    app = GraspDemoApp.__new__(GraspDemoApp)
+    app.args = Namespace(
+        ik_hand="auto",
+        grip_retry_loop=True,
+        grip_retry_max_attempts=0,
+    )
+    app.state = app_state()
+    app.state.retry_attempts = 20
+    app.robot_actions = FakeRobotActions()
+    app.ik_publisher = FakeIkPublisher()
+    app.action_executor = ImmediateExecutor()
+    app.voice_output = FakeVoiceOutput()
+
+    app.start_grip_failure_recovery(
+        "GRIP_FAILED_MIN_LIMIT hand=left: reached min",
+        failed_hand="left",
+    )
+
     assert app.state.retry_will_regrasp is True
+    assert app.state.retry_attempts == 21
+    assert app.voice_output.regrasp_oopsy_calls == 1
+    assert app.voice_output.grasp_failed_calls == 0
 
 
 def app_state():

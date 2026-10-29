@@ -1116,11 +1116,18 @@ class GraspDemoApp:
 
         s.recovery_errors = []
 
-        s.retry_attempts += 1
-        # A failed grasp is retried without an attempt limit.  Keep the
-        # explicit retry-loop switch as the operator's safety stop.
         retry_enabled = bool(getattr(self.args, "grip_retry_loop", True))
-        s.retry_will_regrasp = retry_enabled
+        retry_max_attempts = int(
+            getattr(self.args, "grip_retry_max_attempts", 1)
+        )
+        retry_available = (
+            retry_max_attempts <= 0
+            or s.retry_attempts < retry_max_attempts
+        )
+        retry_limit_reached = retry_enabled and not retry_available
+        s.retry_will_regrasp = retry_enabled and retry_available
+        if s.retry_will_regrasp:
+            s.retry_attempts += 1
 
         hand = failed_hand or ("left" if self.args.ik_hand == "left" else "right")
         s.last_gripper_hand = hand
@@ -1151,11 +1158,24 @@ class GraspDemoApp:
         ]
         s.retry_stage = RetryStage.RECOVERY
 
-        retry_text = (
-            f"retry {s.retry_attempts} (unlimited)"
-            if s.retry_will_regrasp
-            else "retry loop disabled"
-        )
+        voice_output = getattr(self, "voice_output", None)
+        if voice_output is not None:
+            if s.retry_will_regrasp:
+                voice_output.play_regrasp_oopsy()
+            elif retry_limit_reached:
+                voice_output.play_grasp_failed()
+
+        if s.retry_will_regrasp:
+            retry_limit = (
+                "unlimited"
+                if retry_max_attempts <= 0
+                else str(retry_max_attempts)
+            )
+            retry_text = f"retry {s.retry_attempts}/{retry_limit}"
+        elif retry_limit_reached:
+            retry_text = f"retry limit reached ({retry_max_attempts})"
+        else:
+            retry_text = "retry loop disabled"
         s.status = (
             f"Grip failed; stopping old motion, releasing {hand}, then moving "
             f"from measured FK to HOME; {retry_text}"
@@ -1249,7 +1269,23 @@ class GraspDemoApp:
                 f"Recovery done; retry {s.retry_attempts} ready to replan"
             )
         else:
-            s.status = "Recovery done; grip retry loop disabled"
+            retry_enabled = bool(
+                getattr(self.args, "grip_retry_loop", True)
+            )
+            retry_max_attempts = int(
+                getattr(self.args, "grip_retry_max_attempts", 1)
+            )
+            if (
+                retry_enabled
+                and retry_max_attempts > 0
+                and s.retry_attempts >= retry_max_attempts
+            ):
+                s.status = (
+                    "Recovery done; grip retry limit reached "
+                    f"({retry_max_attempts})"
+                )
+            else:
+                s.status = "Recovery done; grip retry loop disabled"
 
         print(f"[grip_retry] {s.status}", flush=True)
 

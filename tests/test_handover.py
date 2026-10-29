@@ -30,7 +30,22 @@ def test_handover_waits_for_confirmation_then_releases_and_returns_home(
     publish_path = Mock(return_value=12)
     release = Mock(return_value="Sent left gripper release")
     sleep = Mock()
-    publish_home = Mock(return_value="Published left home target")
+    thanks_started = Event()
+    home_started = Event()
+
+    def run_thanks(*args, **kwargs):
+        thanks_started.set()
+        assert home_started.wait(timeout=1.0)
+        return "right thank-you completed"
+
+    execute_thanks = Mock(side_effect=run_thanks)
+
+    def run_home(*args, **kwargs):
+        assert thanks_started.wait(timeout=1.0)
+        home_started.set()
+        return "Published left home target"
+
+    publish_home = Mock(side_effect=run_home)
     monkeypatch.setattr(
         handover_module,
         "read_current_tool_pose",
@@ -44,6 +59,7 @@ def test_handover_waits_for_confirmation_then_releases_and_returns_home(
     monkeypatch.setattr(handover_module, "publish_path", publish_path)
     monkeypatch.setattr(handover_module, "send_gripper_signal", release)
     monkeypatch.setattr(handover_module.time, "sleep", sleep)
+    monkeypatch.setattr(handover_module, "execute_thanks", execute_thanks)
     monkeypatch.setattr(handover_module, "publish_home", publish_home)
     release_requested = Event()
     ready = Event()
@@ -74,13 +90,22 @@ def test_handover_waits_for_confirmation_then_releases_and_returns_home(
     assert publish_path.call_args.kwargs["final_hold_sec"] == 0.0
     release.assert_called_once_with("release", ANY, hand="left")
     sleep.assert_called_once_with(POST_RELEASE_HOLD_SEC)
-    publish_home.assert_called_once_with(
+    execute_thanks.assert_called_once_with(
+        publisher,
+        "left",
+        ANY,
+        start_pose=start_pose,
+    )
+    publish_home.assert_called_once()
+    home_args, home_kwargs = publish_home.call_args
+    assert home_args[:3] == (
         publisher,
         "left",
         HOME_CONFIG.position("left"),
-        ANY,
-        final_hold_sec=HOME_CONFIG.hold_sec,
     )
+    np.testing.assert_allclose(home_kwargs["start_pose"][0], LEFT_HANDOVER_XYZ)
+    assert home_kwargs["start_pose"][1] == start_pose[1]
+    assert home_kwargs["final_hold_sec"] == HOME_CONFIG.hold_sec
 
 
 def test_handover_timeout_plays_prompt_then_uses_fixed_place(monkeypatch) -> None:

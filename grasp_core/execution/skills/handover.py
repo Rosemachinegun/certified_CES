@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import argparse
 import time
-from threading import Event
+from threading import Event, Thread
 from typing import Callable
 
 import numpy as np
 
+from add.thanks import execute_thanks, gesture_hand_for_grasp_hand
 from grasp_core.communication.gripper_signal import send_gripper_signal
 from grasp_core.core.math.hand import normalize_hand
 from grasp_core.core.math.pose import PoseWaypoint
@@ -102,6 +103,19 @@ def execute_handover_after_grasp(
     if publisher_stop_requested(publisher):
         return SkillResult(False, f"STOPPED during {hand} handover")
 
+    # Read the idle arm before B is accepted.  After B, both motion streams
+    # only publish poses, so the ROS feedback reader is never driven from two
+    # threads at once.
+    thanks_start_pose = None
+    thanks_preflight_error: Exception | None = None
+    try:
+        thanks_start_pose = read_current_tool_pose(
+            publisher, gesture_hand_for_grasp_hand(hand)
+        )
+    except Exception as exc:  # Handover itself must remain available.
+        thanks_preflight_error = exc
+        print(f"[handover] thank-you preflight failed: {exc}", flush=True)
+
     ready_event.set()
     print(
         f"[handover] {hand} reached handover pose; "
@@ -151,25 +165,73 @@ def execute_handover_after_grasp(
         print(f"[handover] {status}", flush=True)
         return SkillResult(False, status)
 
-    time.sleep(POST_RELEASE_HOLD_SEC)
-    if publisher_stop_requested(publisher):
-        status = f"{hand} handover released; STOPPED before HOME"
+    thanks_result: list[str] = []
+
+    def run_thanks() -> None:
+        try:
+            thanks_result.append(execute_thanks(
+                publisher,
+                hand,
+                args,
+                start_pose=thanks_start_pose,
+            ))
+        except Exception as exc:  # Keep the released handover recoverable.
+            status = f"thank-you skipped: {exc}"
+            thanks_result.append(status)
+            print(f"[handover] {status}", flush=True)
+
+    thanks_thread: Thread | None = None
+    if thanks_preflight_error is None and thanks_start_pose is not None:
+        # Start the idle arm immediately after the B-confirmed release.  The
+        # grasping arm independently follows its normal hold -> HOME path.
+        thanks_thread = Thread(
+            target=run_thanks,
+            name=f"{gesture_hand_for_grasp_hand(hand)}-thanks",
+        )
+        thanks_thread.start()
+    else:
+        thanks_result.append(
+            f"thank-you skipped: preflight failed: {thanks_preflight_error}"
+        )
+
+    home_status: str | None = None
+    stopped_before_home = False
+    try:
+        time.sleep(POST_RELEASE_HOLD_SEC)
+        if publisher_stop_requested(publisher):
+            stopped_before_home = True
+        else:
+            # The grasping tool is still at the exact commanded handover pose,
+            # so avoid a second feedback read while the other arm is moving.
+            home_status = publish_home(
+                publisher,
+                hand,
+                HOME_CONFIG.position(hand),
+                args,
+                start_pose=(target_position, start_orientation),
+                final_hold_sec=max(HOME_CONFIG.hold_sec, 0.0),
+            )
+    finally:
+        if thanks_thread is not None:
+            thanks_thread.join()
+
+    thanks_status = (
+        thanks_result[0]
+        if thanks_result
+        else "thank-you failed: worker returned no status"
+    )
+    if stopped_before_home or publisher_stop_requested(publisher):
+        status = f"{hand} handover released; {thanks_status}; STOPPED before HOME"
         print(f"[handover] {status}", flush=True)
         return SkillResult(False, status)
 
-    home_status = publish_home(
-        publisher,
-        hand,
-        HOME_CONFIG.position(hand),
-        args,
-        final_hold_sec=max(HOME_CONFIG.hold_sec, 0.0),
-    )
+    assert home_status is not None
     status = (
         f"{hand} handover complete; "
         f"xyz=({target_position[0]:.3f},{target_position[1]:.3f},"
         f"{target_position[2]:.3f})m release_confirmed_by=B; "
         f"release={release_status}; post_release_hold={POST_RELEASE_HOLD_SEC:.1f}s; "
-        f"{home_status}; waypoints={len(waypoints)} count={count}"
+        f"{thanks_status}; {home_status}; waypoints={len(waypoints)} count={count}"
     )
     print(f"[handover] {status}", flush=True)
     return SkillResult(True, status)
