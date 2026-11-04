@@ -14,6 +14,7 @@ from add.voice import (
     VoiceToText,
     parse_voice_target,
     requests_handover,
+    voice_language_from_chinese,
     voice_hotwords,
 )
 from add.web import (
@@ -232,6 +233,27 @@ def test_english_box_phrases_request_black_box_handover(phrase: str) -> None:
     assert parsed.handover is True
 
 
+@pytest.mark.parametrize(
+    ("phrase", "target"),
+    (
+        ("把白玩具递给我", "white toy"),
+        ("我想要那个玩偶", "white toy"),
+        ("帮我拿一下毛绒玩具", "white toy"),
+        ("hand me the doll", "white toy"),
+        ("bring me the teddy bear", "white toy"),
+        ("grab the plush toy", "white toy"),
+        ("把文具盒递给我", "black box"),
+        ("帮我拿一下铅笔盒", "black box"),
+        ("抓取那个黑色容器", "black box"),
+        ("pick up the stationery box", "black box"),
+        ("grab the black container", "black box"),
+        ("take the storage box", "black box"),
+    ),
+)
+def test_keyword_aliases_map_to_sam3_targets(phrase: str, target: str) -> None:
+    assert parse_voice_target(phrase) == target
+
+
 def test_voice_language_can_be_switched_without_reloading_model() -> None:
     recognizer = VoiceToText(language="English")
     model_marker = object()
@@ -245,6 +267,22 @@ def test_voice_language_can_be_switched_without_reloading_model() -> None:
     voice = VoiceGraspInput(language="zh")
     assert voice.switch_language("en-US") == "en"
     assert voice.language == "en"
+
+
+def test_voice_language_can_be_controlled_with_boolean() -> None:
+    assert voice_language_from_chinese(True) == "zh"
+    assert voice_language_from_chinese(False) == "en"
+
+    recognizer = VoiceToText(language="en")
+    assert recognizer.set_chinese_input(True) == "zh"
+
+    voice = VoiceGraspInput(language="zh")
+    voice._recognizer = recognizer
+    assert voice.set_chinese_input(False) == "en"
+    assert recognizer.language == "en"
+
+    with pytest.raises(TypeError, match="True or False"):
+        voice.set_chinese_input("false")  # type: ignore[arg-type]
 
 
 def test_recognition_exception_is_reported_as_no_speech() -> None:
@@ -287,6 +325,7 @@ def test_voice_handover_uses_dedicated_action_and_clears_grasp_state() -> None:
         release_requested=app.handover_release_requested,
         ready_event=app.handover_ready,
         fallback_requested=app.handover_fallback_requested,
+        new_round_requested=app.handover_new_round_requested,
         timeout_prompt=app.voice_output.play_no_handover_and_wait,
     )
     future.set_result(SimpleNamespace(
@@ -326,6 +365,7 @@ def test_toy_handover_routes_to_handover_skill_service() -> None:
         release_requested=app.handover_release_requested,
         ready_event=app.handover_ready,
         fallback_requested=app.handover_fallback_requested,
+        new_round_requested=app.handover_new_round_requested,
     )
 
 
@@ -379,6 +419,30 @@ def test_x_requests_immediate_handover_fallback_only_when_ready() -> None:
 
     assert app.handle_key(ord("x"), None)
     assert app.state.status == "Handover fallback already requested by X"
+
+
+def test_d_requests_new_round_only_when_handover_is_ready() -> None:
+    app = GraspDemoApp.__new__(GraspDemoApp)
+    app.state = RuntimeState()
+    app.place_handover_task = True
+    app.handover_ready = Event()
+    app.handover_release_requested = Event()
+    app.handover_fallback_requested = Event()
+    app.handover_new_round_requested = Event()
+    app.manual_home_future = None
+
+    assert app.handle_key(ord("d"), None)
+    assert app.handover_new_round_requested.is_set() is False
+    assert app.state.status == "Handover not ready: D retry ignored"
+
+    app.handover_ready.set()
+    assert app.handle_key(ord("D"), None)
+    assert app.handover_new_round_requested.is_set() is True
+    assert app.state.status == "D detected missed grasp: returning hand HOME"
+
+    assert app.handle_key(ord("b"), None)
+    assert app.handover_release_requested.is_set() is False
+    assert app.state.status == "New grasp round requested by D: B ignored"
 
 
 def test_disabled_web_service_does_not_build_interface(monkeypatch) -> None:

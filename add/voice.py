@@ -26,17 +26,31 @@ VOICE_SAMPLE_RATE = 16_000
 VOICE_MIN_RMS = float(os.getenv("VOICE_MIN_RMS", "0.001"))
 VOICE_GAIN = float(os.getenv("VOICE_GAIN", "1.0"))
 VOICE_AUTO_GAIN = float(os.getenv("VOICE_AUTO_GAIN", "8.0"))
-VOICE_LANGUAGE = os.getenv("VOICE_LANGUAGE", "zh")
+VOICE_LANGUAGE = os.getenv("VOICE_LANGUAGE", "en")
 VOICE_HOTWORDS = {
     "en": (
-        "Marvin give me pick up grab hand me white toy pencil case "
-        "pencil box box black box"
+        "Marvin give me pick up grab take bring hand me white toy toy doll "
+        "figurine plush toy stuffed toy teddy bear pencil case pencil box "
+        "stationery box container storage box black case black container black box"
     ),
     "zh": (
         "Marvin 机械臂 抓取 夹取 我想要 递给我 给我推荐一个 推荐 "
-        "玩具 白色玩具 笔盒 盒子 黑盒 黑色盒子"
+        "玩具 白色玩具 白玩具 玩偶 娃娃 公仔 毛绒玩具 笔盒 文具盒 "
+        "铅笔盒 盒子 收纳盒 容器 黑盒 黑色盒子 黑色收纳盒 黑色容器"
     ),
 }
+
+WHITE_TOY_KEYWORDS = (
+    # Keep generic toy names because there is only one graspable toy class.
+    "白色玩具", "白玩具", "毛绒玩具", "玩偶", "娃娃", "公仔", "玩具",
+    "whitetoy", "stuffedtoy", "plushtoy", "teddybear", "figurine", "doll", "toy","door",
+)
+BLACK_BOX_KEYWORDS = (
+    # Keep generic box names because there is only one graspable box class.
+    "黑色收纳盒", "黑色容器", "黑色盒子", "黑盒", "文具盒", "铅笔盒", "笔盒", "收纳盒", "盒子", "容器",
+    "blackcontainer", "blackcase", "blackbox", "stationerybox", "pencilcase",
+    "pencilbox", "storagebox", "container", "case", "box",
+)
 
 
 def normalize_voice_language(language: str) -> str:
@@ -63,6 +77,18 @@ def normalize_voice_language(language: str) -> str:
 def voice_hotwords(language: str) -> str:
     """Return language-specific vocabulary hints for Faster-Whisper."""
     return VOICE_HOTWORDS[normalize_voice_language(language)]
+
+
+def voice_language_from_chinese(is_chinese: bool) -> str:
+    """Return ``zh`` for Chinese input and ``en`` for English input.
+
+    ``is_chinese`` must be a real boolean: ``True`` selects Chinese and
+    ``False`` selects English.  Rejecting strings avoids the common Python
+    pitfall where ``bool("false")`` is still ``True``.
+    """
+    if not isinstance(is_chinese, bool):
+        raise TypeError("is_chinese must be True or False")
+    return "zh" if is_chinese else "en"
 
 
 class SpeechResult(Protocol):
@@ -106,6 +132,10 @@ class VoiceToText:
         self.language = normalize_voice_language(language)
         print(f"[voice] recognition language={self.language}", flush=True)
         return self.language
+
+    def set_chinese_input(self, is_chinese: bool) -> str:
+        """Use Chinese input when true, otherwise use English input."""
+        return self.switch_language(voice_language_from_chinese(is_chinese))
 
     def _load_model(self):
         from faster_whisper import WhisperModel
@@ -259,15 +289,9 @@ def parse_voice_target(text: str) -> str | None:
     if recommendation:
         return "white toy"
 
-    if any(
-        name in command
-        for name in (
-            "笔盒", "盒子", "黑盒", "黑色盒子",
-            "pencilcase", "pencilbox", "blackbox", "box",
-        )
-    ):
+    if any(name in command for name in BLACK_BOX_KEYWORDS):
         return "black box"
-    if "玩具" in command or "toy" in command:
+    if any(name in command for name in WHITE_TOY_KEYWORDS):
         return "white toy"
     return None
 
@@ -360,6 +384,10 @@ class VoiceGraspInput:
             if callable(switch):
                 switch(self.language)
         return self.language
+
+    def set_chinese_input(self, is_chinese: bool) -> str:
+        """Use Chinese input when true, otherwise use English input."""
+        return self.switch_language(voice_language_from_chinese(is_chinese))
 
     def _recognize_once(self, duration: float | None = None) -> None:
         """Run only microphone/STT work and enqueue its text result."""

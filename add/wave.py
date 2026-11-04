@@ -56,7 +56,11 @@ SET_INPUT_SERVICE = '/control/set_input'
 REPLAY_INPUT = 4
 REQUEST_IK_INPUT = 1
 MAX_START_TO_READY_DELTA_RAD = 1.50
-HOME_START_TOLERANCE_RAD = 0.08
+# Keep the captured HOME envelope tight except for joint 6: the configured
+# Cartesian HOME can settle 0.308 rad from that historical joint capture.
+# This is a start envelope only; return verification stays at 0.03 rad.
+HOME_START_TOLERANCE_RAD = 0.12
+HOME_START_TOLERANCES_RAD = (0.12, 0.12, 0.12, 0.12, 0.12, 0.35, 0.12)
 STATIONARY_VELOCITY_RAD_S = 0.02
 STATIONARY_DURATION_SEC = 0.20
 REPLAY_PRIME_SEC = 0.08
@@ -239,6 +243,7 @@ class WaveGreeting(Node):
         deadline = time.monotonic() + timeout
         stable_since: float | None = None
         last_sequence = -1
+        refusal = "wave refused: right arm did not remain stationary at HOME"
         while rclpy.ok() and time.monotonic() < deadline:
             self.raise_if_stopped()
             rclpy.spin_once(self, timeout_sec=0.05)
@@ -247,6 +252,8 @@ class WaveGreeting(Node):
             last_sequence = self.feedback_sequence
             all_positions = list(self.feedback.arm_positions)
             all_velocities = list(self.feedback.arm_velocities)
+            if len(all_positions) != 14 or len(all_velocities) != 14:
+                raise RuntimeError("wave refused: expected 14 arm positions and velocities")
             if not all(math.isfinite(value)
                        for value in all_positions + all_velocities):
                 raise RuntimeError("non-finite arm joint feedback")
@@ -256,13 +263,20 @@ class WaveGreeting(Node):
             home_errors = [abs(actual - expected)
                            for actual, expected in zip(positions, P0_HOME)]
             max_home_error = max(home_errors)
-            if max_home_error > HOME_START_TOLERANCE_RAD:
-                joint = home_errors.index(max_home_error) + 1
-                raise RuntimeError(
+            outside_home = [i for i, (error, limit) in enumerate(
+                zip(home_errors, HOME_START_TOLERANCES_RAD)
+            ) if error > limit]
+            if outside_home:
+                joint = max(outside_home, key=lambda i: home_errors[i])
+                refusal = (
                     "wave refused: right arm is not at HOME "
-                    f"(joint {joint} error={max_home_error:.3f}rad, "
-                    f"limit={HOME_START_TOLERANCE_RAD:.3f}rad)"
+                    f"(joint {joint + 1} error={home_errors[joint]:.3f}rad, "
+                    f"limit={HOME_START_TOLERANCES_RAD[joint]:.3f}rad)"
                 )
+                stable_since = None
+                continue
+
+            refusal = "wave refused: right arm did not remain stationary at HOME"
 
             ready_errors = [abs(actual - expected)
                             for actual, expected in zip(positions, P1_READY)]
@@ -290,9 +304,7 @@ class WaveGreeting(Node):
                     return left_positions, positions
             else:
                 stable_since = None
-        raise RuntimeError(
-            "wave refused: right arm did not remain stationary at HOME"
-        )
+        raise RuntimeError(refusal)
 
     def hold_until_measured_target(
         self,

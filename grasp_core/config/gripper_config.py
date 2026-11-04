@@ -27,7 +27,7 @@ class GripSignalDefaults:
 class GripperDefaults:
     """左右夹爪的硬件、闭合和识别默认值。"""
 
-    left_server: str = "192.168.14.11:55551"
+    left_server: str = "192.168.10.11:55551"
     right_server: str = "192.168.14.10:55551"
     dual: bool = True
     left_clamp_pos: int = -52525

@@ -1,5 +1,6 @@
 from argparse import Namespace
 from threading import Event, Thread
+from types import SimpleNamespace
 from unittest.mock import ANY, Mock
 
 import numpy as np
@@ -13,6 +14,7 @@ from grasp_core.execution.skills.handover import (
     execute_handover_after_grasp,
     handover_xyz_for_hand,
 )
+from add.new_round import NEW_ROUND_REQUESTED_STATUS
 from grasp_core.execution.result import FixedPlaceResult
 
 
@@ -31,11 +33,13 @@ def test_handover_waits_for_confirmation_then_releases_and_returns_home(
     release = Mock(return_value="Sent left gripper release")
     sleep = Mock()
     thanks_started = Event()
+    thanks_finished = Event()
     home_started = Event()
 
     def run_thanks(*args, **kwargs):
         thanks_started.set()
         assert home_started.wait(timeout=1.0)
+        thanks_finished.set()
         return "right thank-you completed"
 
     execute_thanks = Mock(side_effect=run_thanks)
@@ -46,6 +50,12 @@ def test_handover_waits_for_confirmation_then_releases_and_returns_home(
         return "Published left home target"
 
     publish_home = Mock(side_effect=run_home)
+    def run_post_wave(*args, **kwargs):
+        assert home_started.is_set()
+        assert thanks_finished.is_set()
+        return "Post-thanks wave completed"
+
+    post_wave = Mock(side_effect=run_post_wave)
     monkeypatch.setattr(
         handover_module,
         "read_current_tool_pose",
@@ -61,6 +71,9 @@ def test_handover_waits_for_confirmation_then_releases_and_returns_home(
     monkeypatch.setattr(handover_module.time, "sleep", sleep)
     monkeypatch.setattr(handover_module, "execute_thanks", execute_thanks)
     monkeypatch.setattr(handover_module, "publish_home", publish_home)
+    monkeypatch.setattr(
+        handover_module, "execute_opening_wave_after_thanks", post_wave
+    )
     release_requested = Event()
     ready = Event()
     result_holder = []
@@ -103,9 +116,97 @@ def test_handover_waits_for_confirmation_then_releases_and_returns_home(
         "left",
         HOME_CONFIG.position("left"),
     )
+    runtime_args = home_args[3]
+    assert runtime_args.home_tilt_z_left_deg == HOME_CONFIG.tilt_z_left_deg
+    assert runtime_args.home_tilt_y_left_deg == HOME_CONFIG.tilt_y_left_deg
     np.testing.assert_allclose(home_kwargs["start_pose"][0], LEFT_HANDOVER_XYZ)
     assert home_kwargs["start_pose"][1] == start_pose[1]
     assert home_kwargs["final_hold_sec"] == HOME_CONFIG.hold_sec
+    post_wave.assert_called_once_with(publisher, "left")
+    assert "Post-thanks wave completed" in result.status
+
+
+def test_post_thanks_wave_runs_calibrated_wave_for_right_grasp(
+    monkeypatch,
+) -> None:
+    publisher = Mock()
+    execute_wave = Mock(return_value="Right-arm wave completed")
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "add.wave",
+        SimpleNamespace(execute_wave=execute_wave),
+    )
+
+    status = handover_module.execute_opening_wave_after_thanks(
+        publisher, "right"
+    )
+
+    assert status == "Right-arm wave completed"
+    execute_wave.assert_called_once_with(
+        stop_requested=publisher.stop_requested
+    )
+
+
+def test_post_thanks_wave_does_not_misroute_left_grasp_to_right_arm() -> None:
+    status = handover_module.execute_opening_wave_after_thanks(Mock(), "left")
+
+    assert "skipped" in status
+    assert "grasp hand was left" in status
+
+
+def test_d_request_returns_home_then_opens_gripper(monkeypatch) -> None:
+    publisher = Mock()
+    start_pose = (np.array([0.4, 0.2, 0.7]), (0.0, 0.0, 0.0, 1.0))
+    events = []
+    slow_home = Mock(
+        side_effect=lambda *args, **kwargs: (
+            events.append("home") or "Published left slow home target"
+        )
+    )
+    release = Mock(
+        side_effect=lambda *args, **kwargs: (
+            events.append("release") or "Sent left gripper release"
+        )
+    )
+    monkeypatch.setattr(
+        handover_module, "read_current_tool_pose", Mock(return_value=start_pose)
+    )
+    monkeypatch.setattr(
+        handover_module, "publisher_stop_requested", Mock(return_value=False)
+    )
+    monkeypatch.setattr(handover_module, "publish_path", Mock(return_value=12))
+    monkeypatch.setattr(handover_module, "send_gripper_signal", release)
+    monkeypatch.setattr(
+        handover_module, "return_grasp_hand_home_slowly", slow_home
+    )
+    release_requested = Event()
+    new_round_requested = Event()
+    ready = Event()
+    result_holder = []
+    worker = Thread(
+        target=lambda: result_holder.append(execute_handover_after_grasp(
+            publisher,
+            "left",
+            Namespace(),
+            grasp_confirmed=True,
+            release_requested=release_requested,
+            ready_event=ready,
+            new_round_requested=new_round_requested,
+        ))
+    )
+    worker.start()
+
+    assert ready.wait(timeout=1.0)
+    new_round_requested.set()
+    worker.join(timeout=1.0)
+
+    assert not worker.is_alive()
+    assert result_holder[0].ok is True
+    assert NEW_ROUND_REQUESTED_STATUS in result_holder[0].status
+    slow_home.assert_called_once()
+    release.assert_called_once_with("release", ANY, hand="left")
+    assert events == ["home", "release"]
+    assert ready.is_set() is False
 
 
 def test_handover_timeout_plays_prompt_then_uses_fixed_place(monkeypatch) -> None:

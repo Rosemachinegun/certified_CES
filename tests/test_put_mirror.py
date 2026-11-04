@@ -9,6 +9,7 @@ from grasp_core.core.math.pose import (
     rotation_matrix_from_zyx_euler_deg,
 )
 from grasp_core.core.types.robot_target_pose import matrix_to_quaternion
+from grasp_core.execution.config import HOME_CONFIG
 from grasp_core.execution.skills.place import (
     cubic_bezier_position,
     execute_fixed_place_after_grasp as execute_fixed_put_after_grasp,
@@ -250,12 +251,13 @@ def test_keep_put_pose_false_returns_home(monkeypatch) -> None:
     publisher = FakePublisher(
         (np.array([0.30, -0.20, 0.85]), (0.0, 0.0, 0.0, 1.0)),
     )
-    calls = {"home": 0}
+    calls = {"home": 0, "args": None}
     monkeypatch.setattr("grasp_core.execution.skills.place.publish_path", lambda *a, **k: 1)
     monkeypatch.setattr("grasp_core.execution.skills.place.send_gripper_signal", lambda *a, **k: "release ok")
 
     def fake_home(*args, **kwargs):
         calls["home"] += 1
+        calls["args"] = args[3]
         return "home ok"
 
     monkeypatch.setattr("grasp_core.execution.skills.place.publish_home", fake_home)
@@ -271,6 +273,8 @@ def test_keep_put_pose_false_returns_home(monkeypatch) -> None:
     assert result.ok
     assert result.status.endswith("home ok")
     assert calls["home"] == 1
+    assert calls["args"].home_tilt_z_right_deg == HOME_CONFIG.tilt_z_right_deg
+    assert calls["args"].home_tilt_y_right_deg == HOME_CONFIG.tilt_y_right_deg
 
 
 def put_args() -> Namespace:

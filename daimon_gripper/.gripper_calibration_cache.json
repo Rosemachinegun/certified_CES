@@ -1,14 +1,14 @@
 {
   "192.168.10.11:55551": {
-    "clamp_pos": -46907,
+    "clamp_pos": -48172,
     "max_itinerary": 90000,
-    "open_pos": -136907,
+    "open_pos": -138172,
     "speed_coe": 3600
   },
   "192.168.14.10:55551": {
-    "clamp_pos": 23045,
+    "clamp_pos": 23923,
     "max_itinerary": 90000,
-    "open_pos": -66955,
+    "open_pos": -66077,
     "speed_coe": 3600
   }
 }

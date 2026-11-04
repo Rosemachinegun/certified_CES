@@ -73,6 +73,10 @@ from add.voice_output import (  # noqa: E402
     START_RETRY_RECOGNITION,
     VoiceOutput,
 )
+from add.new_round import (  # noqa: E402
+    NEW_ROUND_REQUESTED_STATUS,
+    START_NEW_ROUND,
+)
 from add.web import (  # noqa: E402
     TabletCommand,
     TabletTaskLoopBridge,
@@ -93,6 +97,7 @@ KEY_GRIP = ord("l")
 KEY_RELEASE = ord("p")
 KEY_VOICE = ord("v")
 KEY_RECOMMEND_GIFT = ord("e")
+KEY_NEW_ROUND = ord("d")
 KEY_WAVE = ord("w")
 KEY_HANDOVER_FALLBACK = ord("x")
 KEY_PAUSE = ord("s")
@@ -193,6 +198,7 @@ class GraspDemoApp:
         self.handover_ready = Event()
         self.handover_release_requested = Event()
         self.handover_fallback_requested = Event()
+        self.handover_new_round_requested = Event()
         self.manual_home_future: Future | None = None
         self.manual_home_hand: tuple[str, ...] | None = None
         self.auto_home_future: Future | None = None
@@ -863,9 +869,12 @@ class GraspDemoApp:
             self.handover_release_requested = Event()
         if not hasattr(self, "handover_fallback_requested"):
             self.handover_fallback_requested = Event()
+        if not hasattr(self, "handover_new_round_requested"):
+            self.handover_new_round_requested = Event()
         self.handover_ready.clear()
         self.handover_release_requested.clear()
         self.handover_fallback_requested.clear()
+        self.handover_new_round_requested.clear()
         # A voice command owns one pick/place cycle, even when perception
         # finds several matching objects. A count of one makes Place return
         # the executing hand HOME instead of parking for the next target.
@@ -890,6 +899,7 @@ class GraspDemoApp:
                 release_requested=self.handover_release_requested,
                 ready_event=self.handover_ready,
                 fallback_requested=self.handover_fallback_requested,
+                new_round_requested=self.handover_new_round_requested,
             )
             if callable(timeout_prompt):
                 handover_kwargs["timeout_prompt"] = timeout_prompt
@@ -924,10 +934,12 @@ class GraspDemoApp:
             self.handover_ready.clear()
             self.handover_release_requested.clear()
             self.handover_fallback_requested.clear()
+            self.handover_new_round_requested.clear()
             return
         target_count = self.place_target_count
         voice_task = self.place_voice_task
         handover_task = self.place_handover_task
+        new_round_task = NEW_ROUND_REQUESTED_STATUS in result.status
         self.place_future = None
         self.place_target_count = None
         self.place_voice_task = False
@@ -935,8 +947,20 @@ class GraspDemoApp:
         self.handover_ready.clear()
         self.handover_release_requested.clear()
         self.handover_fallback_requested.clear()
+        self.handover_new_round_requested.clear()
         self.state.status = result.status
-        if "GRASP_DROPPED" in result.status:
+        if new_round_task:
+            self.state.grasp_confirmed = False
+            self.state.grasp_confirmed_hand = None
+            self.state.grasp_confirmed_label = None
+            self.state.continuous_grasp_pending = False
+            self.state.parked_after_place_hand = None
+            voice_output = getattr(self, "voice_output", None)
+            if voice_output is None:
+                self.state.status = "New round unavailable: no voice output"
+            else:
+                self.state.status = voice_output.play_new_round()
+        elif "GRASP_DROPPED" in result.status:
             self.start_drop_recovery(result.status, result.grasp_hand)
         elif result.ok:
             self.voice_input.finish_task()
@@ -973,9 +997,10 @@ class GraspDemoApp:
             and self.handover_ready.is_set()
             and not self.handover_release_requested.is_set()
             and not self.handover_fallback_requested.is_set()
+            and not self.handover_new_round_requested.is_set()
         ):
             self.state.status = (
-                "Handover ready: press B to release, or X for fallback Place"
+                "Handover ready: B release, X fallback Place, D retry grasp"
             )
 
     def publish_place(self) -> None:
@@ -1670,13 +1695,21 @@ class GraspDemoApp:
             self.voice_recognition_attempt = 0
             self.state.status = f"Voice prompt failed: {result.error}"
             return
-        if result.purpose == START_RECOMMENDED_GIFT:
+        if result.purpose in {START_RECOMMENDED_GIFT, START_NEW_ROUND}:
+            action = (
+                "New round"
+                if result.purpose == START_NEW_ROUND
+                else "Recommended gift"
+            )
             if bool(getattr(self.state, "paused", False)):
-                self.state.status = "Recommended gift cancelled: application paused"
+                self.state.status = f"{action} cancelled: application paused"
                 return
-            if self.robot_busy() or self.voice_input.task_active:
-                self.state.status = "Recommended gift cancelled: robot busy"
-                return
+            robot_busy = self.robot_busy()
+            if robot_busy or self.voice_input.task_active:
+                # D intentionally preserves the active handover voice task.
+                if result.purpose != START_NEW_ROUND or robot_busy:
+                    self.state.status = f"{action} cancelled: robot busy"
+                    return
             self.voice_input.activate("white toy", handover=True)
             self.voice_recognition_attempt = 0
             if not self.start_pipeline(grasp_on_done=True):
@@ -1893,7 +1926,12 @@ class GraspDemoApp:
         if key == KEY_FLOWPOSE and bool(
             getattr(self, "place_handover_task", False)
         ):
-            if self.handover_fallback_requested.is_set():
+            new_round_requested = getattr(
+                self, "handover_new_round_requested", None
+            )
+            if new_round_requested is not None and new_round_requested.is_set():
+                self.state.status = "New grasp round requested by D: B ignored"
+            elif self.handover_fallback_requested.is_set():
                 self.state.status = "Handover fallback requested by X: B ignored"
             elif self.handover_release_requested.is_set():
                 self.state.status = "Handover release already confirmed by B"
@@ -1910,7 +1948,12 @@ class GraspDemoApp:
         if key == KEY_HANDOVER_FALLBACK and bool(
             getattr(self, "place_handover_task", False)
         ):
-            if self.handover_release_requested.is_set():
+            new_round_requested = getattr(
+                self, "handover_new_round_requested", None
+            )
+            if new_round_requested is not None and new_round_requested.is_set():
+                self.state.status = "New grasp round requested by D: X ignored"
+            elif self.handover_release_requested.is_set():
                 self.state.status = "Handover already confirmed by B: X ignored"
             elif self.handover_fallback_requested.is_set():
                 self.state.status = "Handover fallback already requested by X"
@@ -1919,6 +1962,22 @@ class GraspDemoApp:
                 self.state.status = "Handover fallback requested by X"
             else:
                 self.state.status = "Handover not ready: X fallback ignored"
+            return True
+
+        if key == KEY_NEW_ROUND and bool(
+            getattr(self, "place_handover_task", False)
+        ):
+            if self.handover_release_requested.is_set():
+                self.state.status = "Handover already confirmed by B: D ignored"
+            elif self.handover_fallback_requested.is_set():
+                self.state.status = "Handover fallback requested by X: D ignored"
+            elif self.handover_new_round_requested.is_set():
+                self.state.status = "New grasp round already requested by D"
+            elif self.handover_ready.is_set():
+                self.handover_new_round_requested.set()
+                self.state.status = "D detected missed grasp: returning hand HOME"
+            else:
+                self.state.status = "Handover not ready: D retry ignored"
             return True
 
         if key == KEY_CAPTURE:

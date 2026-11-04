@@ -396,11 +396,14 @@ def execute_fixed_place_after_grasp(
         print(f"[place] {stop_status}", flush=True)
         return FixedPlaceResult(False, f"{status}; {stop_status}")
 
+    # Match the startup/manual H-key HOME exactly.  In particular, the raw
+    # application args do not necessarily contain HOME_CONFIG's wrist tilts.
+    home_args = HOME_CONFIG.apply_runtime_args(args, hand)
     home_status = publish_home(
         publisher,
         hand,
         position_for_home(hand, args),
-        args,
+        home_args,
         final_hold_sec=max(config.home_hold_sec, 0.0),
     )
     return FixedPlaceResult(True, f"{status}; {home_status}")

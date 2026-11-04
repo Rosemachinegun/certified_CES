@@ -157,9 +157,10 @@ class RobotActionService:
         release_requested: Event,
         ready_event: Event,
         fallback_requested: Event | None = None,
+        new_round_requested: Event | None = None,
         timeout_prompt: Callable[[], object] | None = None,
     ) -> RobotActionResult:
-        """Wait for B, or run fallback Place after X/timeout."""
+        """Wait for B, fall back after X/timeout, or return HOME after D."""
         handover_hand = hand or ("left" if self.args.ik_hand == "left" else "right")
         result = execute_handover_after_grasp(
             self.ik_publisher,
@@ -169,6 +170,7 @@ class RobotActionService:
             release_requested=release_requested,
             ready_event=ready_event,
             fallback_requested=fallback_requested,
+            new_round_requested=new_round_requested,
             object_type=object_label,
             timeout_prompt=timeout_prompt,
         )

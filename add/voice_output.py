@@ -6,7 +6,7 @@ recording can then start without capturing Marvin's own voice.
 """
 
 from __future__ import annotations
-
+import time
 import random
 import shutil
 import subprocess
@@ -15,6 +15,8 @@ from pathlib import Path
 from queue import Empty, Queue
 from threading import Event, Lock, Thread
 from typing import Sequence
+
+from add.new_round import NEW_ROUND_SEQUENCE, START_NEW_ROUND
 
 
 DEFAULT_VOICE_DIR = Path("/home/kewei/marvin_voice")
@@ -129,6 +131,10 @@ class VoiceOutput:
         status, _request = self._queue_files((path,), START_RECOMMENDED_GIFT)
         return status
 
+    def play_new_round(self) -> str:
+        """Play the D-key retry prompt before starting fresh perception."""
+        return self.play_sequence(NEW_ROUND_SEQUENCE, purpose=START_NEW_ROUND)
+
     def play_task_failed(self) -> str:
         """Tell the user that speech or the requested gift was not found."""
         return self.play_sequence(TASK_FAILED_SEQUENCE)
@@ -232,6 +238,11 @@ class VoiceOutput:
             for path in request.files:
                 if not self._is_current(request.generation):
                     return
+                if path.parent.name == "05_1_reply_thanks":
+                   for _ in range(15):
+                       if not self._is_current(request.generation):
+                        return
+                       time.sleep(0.1)
                 print(f"[voice-output] playing {path}", flush=True)
                 process = subprocess.Popen(self._command(path))
                 with self._state_lock:

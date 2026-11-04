@@ -15,6 +15,7 @@ from add.voice_output import (
     VoiceOutput,
     VoicePlaybackResult,
 )
+from add.new_round import NEW_ROUND_SEQUENCE, START_NEW_ROUND
 from grasp_core.tools.flowpose_request_ik_app import GraspDemoApp
 from grasp_core.tools.flowpose_request_ik_app import PipelineStage, RuntimeState
 from add.voice import VoiceGraspInput
@@ -117,6 +118,29 @@ def test_recommended_gift_plays_the_exact_configured_file(tmp_path: Path) -> Non
     assert result is not None
     assert result.files == (prompt,)
     assert result.purpose == START_RECOMMENDED_GIFT
+
+
+def test_new_round_plays_try_prompt_then_requests_restart(tmp_path: Path) -> None:
+    prompt_dir = tmp_path / NEW_ROUND_SEQUENCE[0]
+    prompt_dir.mkdir()
+    prompt = prompt_dir / "01_let_me_try_again.mp3"
+    prompt.touch()
+    output = VoiceOutput(tmp_path, player="/bin/true")
+    try:
+        status = output.play_new_round()
+        result = None
+        deadline = time.monotonic() + 1.0
+        while result is None and time.monotonic() < deadline:
+            result = output.poll()
+            if result is None:
+                time.sleep(0.01)
+    finally:
+        output.close()
+
+    assert "07_1_try" in status
+    assert result is not None
+    assert result.files == (prompt,)
+    assert result.purpose == START_NEW_ROUND
 
 
 class _VoiceOutput:
@@ -330,6 +354,26 @@ def test_e_key_prompt_then_starts_rightmost_toy_handover_workflow() -> None:
     app.voice_input.activate.assert_called_once_with("white toy", handover=True)
     app.start_pipeline.assert_called_once_with(grasp_on_done=True)
     app.voice_output.play_task_accepted.assert_not_called()
+
+
+def test_d_prompt_completion_starts_a_fresh_toy_handover_workflow() -> None:
+    result = VoicePlaybackResult(
+        files=(Path("01_let_me_try_again.mp3"),),
+        purpose=START_NEW_ROUND,
+    )
+    app = GraspDemoApp.__new__(GraspDemoApp)
+    app.state = RuntimeState()
+    app.voice_input = Mock()
+    app.voice_input.task_active = True
+    app.voice_output = Mock()
+    app.voice_output.poll.return_value = result
+    app.robot_busy = Mock(return_value=False)
+    app.start_pipeline = Mock(return_value=True)
+
+    app.collect_voice_output()
+
+    app.voice_input.activate.assert_called_once_with("white toy", handover=True)
+    app.start_pipeline.assert_called_once_with(grasp_on_done=True)
 
 
 def test_recognition_does_not_start_if_app_is_paused_during_prompt() -> None:

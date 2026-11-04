@@ -11,6 +11,10 @@ from typing import Callable
 import numpy as np
 
 from add.thanks import execute_thanks, gesture_hand_for_grasp_hand
+from add.new_round import (
+    NEW_ROUND_REQUESTED_STATUS,
+    return_grasp_hand_home_slowly,
+)
 from grasp_core.communication.gripper_signal import send_gripper_signal
 from grasp_core.core.math.hand import normalize_hand
 from grasp_core.core.math.pose import PoseWaypoint
@@ -52,6 +56,25 @@ def handover_xyz_for_hand(hand: str) -> tuple[float, float, float]:
     return (x, left_y, z) if normalize_hand(hand) == "left" else (x, -left_y, z)
 
 
+def execute_opening_wave_after_thanks(
+    publisher: RequestIkTargetPublisher,
+    grasp_hand: str,
+) -> str:
+    """Run the calibrated opening wave after both arms have returned HOME."""
+    grasp_hand = normalize_hand(grasp_hand)
+    if grasp_hand != "right":
+        return (
+            "Post-thanks wave skipped: wave.py is calibrated for the right "
+            "arm, but the grasp hand was left"
+        )
+
+    # Import lazily: wave.py depends on ROS-only message packages, while the
+    # handover module is also imported by non-ROS planning/unit-test code.
+    from add.wave import execute_wave
+
+    return execute_wave(stop_requested=publisher.stop_requested)
+
+
 def execute_handover_after_grasp(
     publisher: RequestIkTargetPublisher | None,
     hand: str,
@@ -61,10 +84,11 @@ def execute_handover_after_grasp(
     release_requested: Event,
     ready_event: Event,
     fallback_requested: Event | None = None,
+    new_round_requested: Event | None = None,
     object_type: str | None = None,
     timeout_prompt: Callable[[], object] | None = None,
 ) -> SkillResult:
-    """Move to handover; B releases, while X or timeout runs fallback Place."""
+    """Move to handover; B releases, X falls back, and D retries the grasp."""
     hand = normalize_hand(hand)
     if not bool(grasp_confirmed):
         status = f"{hand} handover blocked: grasp is not confirmed"
@@ -119,13 +143,33 @@ def execute_handover_after_grasp(
     ready_event.set()
     print(
         f"[handover] {hand} reached handover pose; "
-        "press B to release or X for fallback Place",
+        "press B to release, X for fallback Place, or D to retry the grasp",
         flush=True,
     )
     confirm_deadline = time.monotonic() + HANDOVER_CONFIRM_TIMEOUT_SEC
     while not release_requested.wait(timeout=HANDOVER_CONFIRM_POLL_SEC):
         if publisher_stop_requested(publisher):
             return SkillResult(False, f"STOPPED while {hand} awaited B release")
+        if new_round_requested is not None and new_round_requested.is_set():
+            ready_event.clear()
+            home_status = return_grasp_hand_home_slowly(
+                publisher,
+                hand,
+                args,
+                start_pose=(target_position, start_orientation),
+            )
+            release_status = send_gripper_signal("release", args, hand=hand)
+            if _release_failed(release_status):
+                status = f"{hand} new-round release failed: {release_status}"
+                print(f"[handover] {status}", flush=True)
+                return SkillResult(False, status)
+            status = (
+                f"{NEW_ROUND_REQUESTED_STATUS} hand={hand}; "
+                f"returned HOME and opened gripper; "
+                f"{home_status}; release={release_status}"
+            )
+            print(f"[handover] {status}", flush=True)
+            return SkillResult(True, status)
         forced_fallback = (
             fallback_requested is not None and fallback_requested.is_set()
         )
@@ -203,11 +247,14 @@ def execute_handover_after_grasp(
         else:
             # The grasping tool is still at the exact commanded handover pose,
             # so avoid a second feedback read while the other arm is moving.
+            # Use the same configured HOME pose (including wrist tilt) as the
+            # startup and manual H-key paths.
+            home_args = HOME_CONFIG.apply_runtime_args(args, hand)
             home_status = publish_home(
                 publisher,
                 hand,
                 HOME_CONFIG.position(hand),
-                args,
+                home_args,
                 start_pose=(target_position, start_orientation),
                 final_hold_sec=max(HOME_CONFIG.hold_sec, 0.0),
             )
@@ -226,12 +273,19 @@ def execute_handover_after_grasp(
         return SkillResult(False, status)
 
     assert home_status is not None
+    try:
+        wave_status = execute_opening_wave_after_thanks(publisher, hand)
+    except Exception as exc:  # The object was already released successfully.
+        wave_status = f"Post-thanks wave failed: {exc}"
+        print(f"[handover] {wave_status}", flush=True)
+
     status = (
         f"{hand} handover complete; "
         f"xyz=({target_position[0]:.3f},{target_position[1]:.3f},"
         f"{target_position[2]:.3f})m release_confirmed_by=B; "
         f"release={release_status}; post_release_hold={POST_RELEASE_HOLD_SEC:.1f}s; "
-        f"{thanks_status}; {home_status}; waypoints={len(waypoints)} count={count}"
+        f"{thanks_status}; {home_status}; {wave_status}; "
+        f"waypoints={len(waypoints)} count={count}"
     )
     print(f"[handover] {status}", flush=True)
     return SkillResult(True, status)
